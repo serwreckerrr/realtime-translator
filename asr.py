@@ -19,7 +19,8 @@ OVERLAP_SECONDS: float = 2.0
 STEP_SECONDS: float = 0.8                 
 UNSTABLE_TAIL_SECONDS: float = OVERLAP_SECONDS          
 MIN_DECODE_SECONDS: float = 1.0             
-SILENCE_FLUSH_SECONDS: float = 2.5          # Increased from 1.2 to optimize end-of-speech precision
+SILENCE_FLUSH_SECONDS: float = 0.6          # Increased from 1.2 to optimize end-of-speech precision
+MAX_UTTERANCE_SECONDS: float = 8            # Hard limit on utterance length to prevent runaway memory usage
 MAX_PROMPT_CHARS: int = 200                 
 LANGUAGE_LOCK_MIN_CONFIDENCE: float = 0.65   
 MIN_TOKENS_FOR_LANG_LOCK: int = 4          
@@ -130,12 +131,21 @@ class WhisperEngine:
             self._samples_since_last_decode += chunk_samples
 
         if is_speech:
-            self._silence_seconds_accum = 0.0
+            self._silence_seconds_accum += 0.0
         else:
             self._silence_seconds_accum += chunk_duration
 
+        ends_with_sentence_boundary = False
+        if self._confirmed_word_tokens:
+            stable_text = self._render_words([w.text for w in self._confirmed_word_tokens]).strip()
+            if stable_text.endswith(('.', '?', '...')):
+                ends_with_sentence_boundary = True
+
         has_pending_audio = self.ring_buffer.filled_seconds > 0.0 or bool(self._confirmed_word_tokens)
-        should_flush = has_pending_audio and self._silence_seconds_accum >= SILENCE_FLUSH_SECONDS
+        should_flush = has_pending_audio and (
+            self._silence_seconds_accum >= SILENCE_FLUSH_SECONDS 
+            or ends_with_sentence_boundary
+        )
 
         decode_due = (is_speech and self._samples_since_last_decode >= self._step_samples)
         buffer_ready = self.ring_buffer.filled_seconds * self.sample_rate >= self._min_decode_samples
@@ -168,8 +178,12 @@ class WhisperEngine:
         active_buffer = ring_history if ring_history is not None else self.ring_buffer
         window_end_absolute_seconds = self._total_samples_seen / TARGET_SAMPLE_RATE
 
+        # FIX: Remove '+ OVERLAP_SECONDS'. uncommitted_duration already naturally includes 
+        # the UNSTABLE_TAIL_SECONDS (2.0s) from the previous iteration along with the new 
+        # STEP_SECONDS (0.8s), providing the exact sliding context needed.
         uncommitted_duration = window_end_absolute_seconds - self._committed_until_time
-        required_duration = uncommitted_duration + OVERLAP_SECONDS
+        # required_duration = uncommitted_duration + OVERLAP_SECONDS
+        required_duration = uncommitted_duration
         decode_duration = max(MIN_DECODE_SECONDS, min(required_duration, WINDOW_SECONDS))
 
         window_audio = active_buffer.get_last(decode_duration)
