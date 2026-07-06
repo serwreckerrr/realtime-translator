@@ -91,4 +91,5 @@ class CaptionPipeline:
                 translated_text = server_content.output_transcription.text
                 if translated_text:
                     # Forward text to PySide6 UI thread safely via Signal
-                    self.overlay.caption_updated.emit(translated_text.strip())
+                    #self.overlay.caption_updated.emit(translated_text.strip())
+                    self.overlay.caption_updated.emit(translated_text)
