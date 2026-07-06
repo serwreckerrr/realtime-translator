@@ -288,6 +288,13 @@ class OverlayWindow(QWidget):
         self._fade_animation.setEndValue(target_opacity)
         self._fade_animation.start()
 
+    def update_caption(self, text: str, is_final: bool = False) -> None:
+        self.caption_updated.emit(text)
+
+    def clear_caption(self) -> None:
+        """Compatibility shim to clear the currently displayed caption text."""
+        self.set_caption("")
+
     def set_font_size(self, size: int) -> None:
         """Public configuration modifier to change the caption display font sizing layout.
 

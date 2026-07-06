@@ -1,8 +1,16 @@
 import asyncio
 import logging
+import os
 import sys
 import threading
 from typing import Optional
+import soundcard as sc
+
+try:
+    # Safely probe devices early to establish clean MTA thread initialization
+    _ = sc.default_speaker()
+except Exception:
+    pass
 
 from PySide6.QtWidgets import QApplication
 from dotenv import load_dotenv
@@ -12,13 +20,14 @@ from asr import WhisperEngine
 from translation import Translator
 from overlay import OverlayWindow
 from pipeline import CaptionPipeline
+from translation import Translator, ConfigurableTranslationBackend
 
 # --------------------------------------------------------------------------
 # Configuration constants (no magic numbers below this point)
 # --------------------------------------------------------------------------
 AUDIO_CHUNK_DURATION_SECONDS: float = 0.5
 AUDIO_USE_VAD: bool = True
-AUDIO_VAD_THRESHOLD: float = 0.4
+AUDIO_VAD_THRESHOLD: float = 0.5
 
 # Tối ưu cho máy yếu: Sử dụng mẫu "tiny" để tăng tốc độ suy luận gấp nhiều lần trên CPU
 WHISPER_MODEL_NAME: str = "base"
@@ -74,7 +83,7 @@ def build_pipeline_components() -> tuple[AudioCapture, WhisperEngine, Translator
         raise
 
     try:
-        translator = Translator(backend=None)
+        translator = Translator(backend=ConfigurableTranslationBackend())
     except Exception as translator_err:
         logger.critical(f"Failed to initialize Translator: {translator_err}", exc_info=True)
         raise

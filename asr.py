@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import whisper
+from faster_whisper import WhisperModel
 
 from audio import RingBuffer, TARGET_SAMPLE_RATE
 
@@ -89,7 +89,7 @@ class WhisperEngine:
             self.device = device
 
         logger.info(f"Loading OpenAI Whisper model '{model_name}' on device: {self.device}")
-        self.model: whisper.Whisper = whisper.load_model(model_name, device=self.device)
+        self.model = WhisperModel(model_name, device=self.device, compute_type="int8")
         logger.info("Whisper model loaded successfully.")
 
         self.sample_rate: int = TARGET_SAMPLE_RATE
@@ -178,11 +178,7 @@ class WhisperEngine:
         active_buffer = ring_history if ring_history is not None else self.ring_buffer
         window_end_absolute_seconds = self._total_samples_seen / TARGET_SAMPLE_RATE
 
-        # FIX: Remove '+ OVERLAP_SECONDS'. uncommitted_duration already naturally includes 
-        # the UNSTABLE_TAIL_SECONDS (2.0s) from the previous iteration along with the new 
-        # STEP_SECONDS (0.8s), providing the exact sliding context needed.
         uncommitted_duration = window_end_absolute_seconds - self._committed_until_time
-        # required_duration = uncommitted_duration + OVERLAP_SECONDS
         required_duration = uncommitted_duration
         decode_duration = max(MIN_DECODE_SECONDS, min(required_duration, WINDOW_SECONDS))
 
@@ -194,7 +190,8 @@ class WhisperEngine:
 
         with torch.inference_mode():
             inference_start = time.time()
-            result: Dict[str, Any] = self.model.transcribe(
+            # FIX: faster-whisper returns (segments_generator, transcription_info)
+            segments_gen, info = self.model.transcribe(
                 window_audio,
                 language=self.detected_language if self._language_locked else None,
                 task="transcribe",
@@ -202,16 +199,15 @@ class WhisperEngine:
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 initial_prompt=self._build_prompt(),
-                fp16=(self.device == "cuda" and torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 7),
                 beam_size=1,        
                 best_of=1,
-                verbose=None,
             )
-            # Added debug logging for Whisper inference execution speed
+            # We must convert the lazy segments generator to a list to trigger execution
+            segments = list(segments_gen)
             logger.debug(f"[ASR] Whisper inference time: {(time.time() - inference_start) * 1000.0:.2f}ms")
 
-        detected_language = result.get("language")
-        current_hyp = self._extract_word_tokens(result, window_start_absolute_seconds)
+        detected_language = info.language if info else None
+        current_hyp = self._extract_word_tokens(segments, window_start_absolute_seconds)
         avg_probability = float(np.mean([w.probability for w in current_hyp])) if current_hyp else 0.0
 
         if detected_language and not self._language_locked:
@@ -314,15 +310,18 @@ class WhisperEngine:
 
         self._committed_until_time = newly_confirmed[-1].end
 
-    def _extract_word_tokens(self, result: Dict[str, Any], window_start_abs: float) -> List[WordToken]:
+    def _extract_word_tokens(self, segments: List[Any], window_start_abs: float) -> List[WordToken]:
         tokens: List[WordToken] = []
         hallucination_blacklist = {"thank you", "thanks for watching", "subtitles by", "amara.org"}
 
-        for segment in result.get("segments", []):
-            if segment.get("temperature", 0.0) > 0.5 and segment.get("avg_logprob", 0.0) < -1.0:
+        # FIX: Parse segments and word objects using faster-whisper property structures
+        for segment in segments:
+            if segment.temperature > 0.5 and segment.avg_logprob < -1.0:
                 continue
-            for word_info in segment.get("words", []):
-                text = word_info.get("word", "")
+            if not segment.words:
+                continue
+            for word_info in segment.words:
+                text = word_info.word
                 if not text or not text.strip():
                     continue
                 normalized = _normalize_word(text)
@@ -332,9 +331,9 @@ class WhisperEngine:
                 tokens.append(
                     WordToken(
                         text=text,
-                        start=window_start_abs + float(word_info.get("start", 0.0)),
-                        end=window_start_abs + float(word_info.get("end", 0.0)),
-                        probability=float(word_info.get("probability", 0.0)),
+                        start=window_start_abs + float(word_info.start),
+                        end=window_start_abs + float(word_info.end),
+                        probability=float(word_info.probability),
                     )
                 )
         tokens.sort(key=lambda w: w.start)
